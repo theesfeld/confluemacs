@@ -321,7 +321,7 @@ PARENT-ID is optional."
                  ("space" . (("key" . ,space-key)))
                  ("body" . (("storage" . (("value" . ,body)
                                           ("representation" . "storage")))))
-                 ,@(when parent-id `(("ancestors" . ((("id" . ,parent-id))))))))
+                 ,@(when parent-id `(("ancestors" . ((("id" . ,parent-id)))))))))
     (confluemacs--make-request "/content" "POST" nil data)))
 
 (defun confluemacs-update-content (id title org-text version &optional space-key)
