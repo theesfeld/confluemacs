@@ -261,7 +261,7 @@ PARENT-ID is optional."
                  ("body" . (("storage" . (("value" . ,body)
                                           ("representation" . "storage")))))
                  ,@(when parent-id `(("ancestors" . ((("id" . ,parent-id))))))))
-         (confluemacs--make-request "/content" "POST" nil data))))
+    (confluemacs--make-request "/content" "POST" nil data)))
 
 (defun confluemacs-update-content (id title org-text version &optional space-key)
   "Update content with ID, TITLE, ORG-TEXT, and VERSION.
@@ -273,8 +273,8 @@ SPACE-KEY is optional."
                  ,@(when space-key `(("space" . (("key" . ,space-key)))))
                  ("body" . (("storage" . (("value" . ,body)
                                           ("representation" . "storage")))))
-                 ("version" . (("number" . ,version)))))
-         (confluemacs--make-request (format "/content/%s" id) "PUT" nil data))))
+                 ("version" . (("number" . ,version))))))
+    (confluemacs--make-request (format "/content/%s" id) "PUT" nil data)))
 
 (defun confluemacs-delete ()
   "Delete the item at point (space or content)."
