@@ -86,7 +86,9 @@ HEADERS is an alist of additional headers."
          (default-headers `(("Authorization" . ,auth)
                             ("Content-Type" . "application/json")
                             ("X-Atlassian-Token" . "nocheck")))
-         (all-headers (append headers default-headers)))
+         (all-headers (append headers default-headers))
+         (response-data nil)
+         (error-occurred nil))
     (request url
       :type method
       :params params
@@ -97,11 +99,14 @@ HEADERS is an alist of additional headers."
       :sync t
       :success (cl-function
                 (lambda (&key data &allow-other-keys)
-                  data))
+                  (setq response-data data)))
       :error (cl-function
               (lambda (&key error-thrown &allow-other-keys)
-                (message "Confluemacs API error: %s" error-thrown)
-                nil)))))
+                (setq error-occurred t)
+                (message "Confluemacs API error: %s" error-thrown))))
+    (if error-occurred
+        nil
+      response-data)))
 
 (defun confluemacs--handle-response (data)
   "Process the API response DATA and return it."
@@ -117,31 +122,36 @@ HEADERS is an alist of additional headers."
 
 (defun confluemacs--org-to-confluence (org-text)
   "Convert ORG-TEXT to Confluence storage format (HTML)."
-  (with-temp-buffer
-    (insert org-text)
-    (if (executable-find "pandoc")
-        (shell-command-on-region
-         (point-min) (point-max)
-         "pandoc -f org -t html"
-         (current-buffer) t)
-      (let ((org-export-with-toc nil)
-            (org-export-with-section-numbers nil))
-        (org-export-string-as org-text 'html t)))))
+  (if (not org-text)
+      ""
+    (with-temp-buffer
+      (insert org-text)
+      (if (executable-find "pandoc")
+          (progn
+            (shell-command-on-region
+             (point-min) (point-max)
+             "pandoc -f org -t html"
+             (current-buffer) t)
+            (buffer-string))
+        (let ((org-export-with-toc nil)
+              (org-export-with-section-numbers nil))
+          (org-export-string-as org-text 'html t))))))
 
 (defun confluemacs--confluence-to-org (html-text)
   "Convert Confluence storage format (HTML) to Org-mode."
-  (with-temp-buffer
-    (insert html-text)
-    (if (executable-find "pandoc")
-        (shell-command-on-region
-         (point-min) (point-max)
-         "pandoc -f html -t org"
-         (current-buffer) t)
-      (let ((html (replace-regexp-in-string "<[^>]+>" "" html-text)))
-        (with-temp-buffer
-          (insert html)
-          (org-mode)
-          (buffer-string))))))
+  (if (not html-text)
+      ""
+    (with-temp-buffer
+      (insert html-text)
+      (if (executable-find "pandoc")
+          (progn
+            (shell-command-on-region
+             (point-min) (point-max)
+             "pandoc -f html -t org"
+             (current-buffer) t)
+            (buffer-string))
+        (let ((html (replace-regexp-in-string "<[^>]+>" "" html-text)))
+          html)))))
 
 ;;; Dired-like Interface
 (define-derived-mode confluemacs-mode special-mode "Confluemacs"
