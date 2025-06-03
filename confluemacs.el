@@ -94,13 +94,14 @@ HEADERS is an alist of additional headers."
       :headers all-headers
       :parser 'json-read
       :timeout confluemacs-timeout
-      :sync nil
+      :sync t
       :success (cl-function
                 (lambda (&key data &allow-other-keys)
-                  (confluemacs--handle-response data)))
+                  data))
       :error (cl-function
               (lambda (&key error-thrown &allow-other-keys)
-                (message "Confluemacs API error: %s" error-thrown))))))
+                (message "Confluemacs API error: %s" error-thrown)
+                nil)))))
 
 (defun confluemacs--handle-response (data)
   "Process the API response DATA and return it."
@@ -110,9 +111,9 @@ HEADERS is an alist of additional headers."
 
 (defun confluemacs--check-edit-permission (content-id)
   "Check if the user has edit permission for CONTENT-ID."
-  (request-response-data
-   (confluemacs--make-request
-    (format "/content/%s/restriction/byOperation/update" content-id) "GET")))
+  (let ((response (confluemacs--make-request
+                   (format "/content/%s/restriction/byOperation/update" content-id) "GET")))
+    (not (null response))))
 
 (defun confluemacs--org-to-confluence (org-text)
   "Convert ORG-TEXT to Confluence storage format (HTML)."
@@ -184,12 +185,38 @@ HEADERS is an alist of additional headers."
 
 (defun confluemacs--display-spaces ()
   "Display a list of Confluence spaces."
-  (confluemacs--make-request "/space" "GET" '(("limit" . 100))))
+  (let* ((response (confluemacs--make-request "/space" "GET" '(("limit" . 100))))
+         (spaces (confluemacs--handle-response response)))
+    (when spaces
+      (insert (format "%-10s %-30s\n" "Key" "Name"))
+      (insert (make-string 40 ?-))
+      (insert "\n")
+      (dolist (space spaces)
+        (let ((key (cdr (assq 'key space)))
+              (name (cdr (assq 'name space))))
+          (insert (format "%-10s %-30s\n" key name))
+          (put-text-property (line-beginning-position) (line-end-position)
+                             'confluemacs-type 'space)
+          (put-text-property (line-beginning-position) (line-end-position)
+                             'confluemacs-key key))))))
 
 (defun confluemacs--display-content (space-key)
   "Display content for SPACE-KEY."
-  (confluemacs--make-request "/content" "GET"
-                             `(("spaceKey" . ,space-key) ("expand" . ,confluemacs-expand-default) ("limit" . 100))))
+  (let* ((response (confluemacs--make-request "/content" "GET"
+                                              `(("spaceKey" . ,space-key) ("expand" . ,confluemacs-expand-default) ("limit" . 100))))
+         (content-list (confluemacs--handle-response response)))
+    (when content-list
+      (insert (format "%-10s %-30s\n" "ID" "Title"))
+      (insert (make-string 40 ?-))
+      (insert "\n")
+      (dolist (content content-list)
+        (let ((id (cdr (assq 'id content)))
+              (title (cdr (assq 'title content))))
+          (insert (format "%-10s %-30s\n" id title))
+          (put-text-property (line-beginning-position) (line-end-position)
+                             'confluemacs-type 'content)
+          (put-text-property (line-beginning-position) (line-end-position)
+                             'confluemacs-id id))))))
 
 (defun confluemacs-open ()
   "Open the item at point (space or content)."
@@ -214,8 +241,32 @@ HEADERS is an alist of additional headers."
 (defun confluemacs-get-content-by-id (id &optional expand)
   "Retrieve content by ID and display as Org-mode.
 EXPAND is a string of fields to expand (default: confluemacs-expand-default)."
-  (confluemacs--make-request (format "/content/%s" id) "GET"
-                             `(("expand" . ,(or expand confluemacs-expand-default)))))
+  (let* ((response (confluemacs--make-request (format "/content/%s" id) "GET"
+                                              `(("expand" . ,(or expand confluemacs-expand-default)))))
+         (content response))
+    (when content
+      (let* ((body (cdr (assq 'storage (cdr (assq 'body content)))))
+             (html (cdr (assq 'value body)))
+             (org-text (confluemacs--confluence-to-org html))
+             (title (cdr (assq 'title content)))
+             (version (cdr (assq 'number (cdr (assq 'version content)))))
+             (buffer (get-buffer-create (format "*Confluemacs: %s*" title)))
+             (can-edit (confluemacs--check-edit-permission id)))
+        (with-current-buffer buffer
+          (erase-buffer)
+          (insert org-text)
+          (org-mode)
+          (setq-local confluemacs-content-id id)
+          (setq-local confluemacs-content-title title)
+          (setq-local confluemacs-content-version version)
+          (setq-local confluemacs-content-space-key
+                      (cdr (assq 'key (cdr (assq 'space content)))))
+          (setq buffer-read-only (not can-edit))
+          (when can-edit
+            (local-set-key (kbd "C-c C-c") 'confluemacs-save-content)))
+        (switch-to-buffer buffer)
+        (when (not can-edit)
+          (message "Content is read-only: No edit permission"))))))
 
 (defun confluemacs-create-content (type title space-key)
   "Create content of TYPE with TITLE in SPACE-KEY from an Org-mode buffer."
@@ -284,15 +335,21 @@ SPACE-KEY is optional."
      ((eq type 'space)
       (let ((key (get-text-property (point) 'confluemacs-key)))
         (when (y-or-n-p (format "Delete space %s? " key))
-          (confluemacs--make-request (format "/space/%s" key) "DELETE")
-          (message "Space %s deleted" key)
-          (confluemacs-refresh))))
+          (let ((response (confluemacs--make-request (format "/space/%s" key) "DELETE")))
+            (if response
+                (progn
+                  (message "Space %s deleted" key)
+                  (confluemacs-refresh))
+              (message "Failed to delete space %s" key))))))
      ((eq type 'content)
       (let ((id (get-text-property (point) 'confluemacs-id)))
         (when (y-or-n-p "Delete content? ")
-          (confluemacs--make-request (format "/content/%s" id) "DELETE")
-          (message "Content deleted")
-          (confluemacs-refresh)))))))
+          (let ((response (confluemacs--make-request (format "/content/%s" id) "DELETE")))
+            (if response
+                (progn
+                  (message "Content deleted")
+                  (confluemacs-refresh))
+              (message "Failed to delete content"))))))))
 
 ;;; Transient Menu
 (transient-define-prefix confluemacs-menu ()
