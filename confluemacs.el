@@ -1010,8 +1010,8 @@ This function uses call-process instead of shell-command for security."
     (define-key map (kbd "n") 'confluemacs-next-page)
     (define-key map (kbd "p") 'confluemacs-previous-page)
     (define-key map (kbd "G") 'confluemacs-goto-page)
-    ;; Search
-    (define-key map (kbd "s") 'confluemacs-search-interactive)
+    ;; Search - disabled until implementation
+    ;; (define-key map (kbd "s") 'confluemacs-search-interactive)
     map)
   "Keymap for `confluemacs-mode'.")
 
@@ -1338,8 +1338,7 @@ SPACE-KEY is optional."
    ["Advanced"
     ("sg" "Get spaces" confluemacs-get-spaces)
     ("cg" "Get content" confluemacs-get-content)
-    ("ss" "Interactive search" confluemacs-search-interactive)
-    ("sc" "CQL search" confluemacs-search)]
+    ("ss" "Search (CQL)" confluemacs-search)]
    ["API Management"
     ("v" "Check API version" confluemacs-check-api-version)
     ("V" "Migrate to API v2" confluemacs-migrate-to-v2)]
@@ -1361,6 +1360,7 @@ PARAMS is an alist of query parameters."
 
 (defun confluemacs-search (cql &optional params)
   "Search Confluence using CQL query."
+  (interactive "sSearch query (CQL): ")
   (let ((params (append params `(("cql" . ,cql)
                                  ("expand" . ,confluemacs-expand-default)))))
     (confluemacs--make-request "/content/search" "GET" params)))
