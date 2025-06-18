@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Your Name
 
 ;; Author: Your Name <your.email@example.com>
-;; Version: 0.4
+;; Version: 0.5
 ;; Package-Requires: ((emacs "27.1") (request "0.3.3") (org "9.4") (transient "0.7.8"))
 ;; Keywords: tools, confluence, org-mode, dired
 ;; URL: https://github.com/yourusername/confluemacs
@@ -11,11 +11,17 @@
 ;;; Commentary:
 
 ;; This package provides a Dired-like interface to browse Confluence Cloud spaces
-;; and content (pages, blogposts) using the REST API v5.7.1. Content is displayed
-;; and edited in Org-mode, converted to/from Confluence storage format (HTML).
-;; Buffers are read-only if the user lacks edit permissions.
-;; Authentication uses `.authinfo.gpg` with an API token.
-;; See https://docs.atlassian.com/atlassian-confluence/REST/5.7.1/ for API details.
+;; and content (pages, blogposts) using the Confluence Cloud REST API.
+;; Content is displayed and edited in Org-mode, converted to/from Confluence
+;; storage format (HTML). Buffers are read-only if the user lacks edit permissions.
+;;
+;; Authentication uses `.authinfo.gpg` with an API token (NOT password).
+;; Basic auth with API tokens is the standard method for scripts/CLI tools.
+;;
+;; IMPORTANT: Confluence REST API v1 will be deprecated on April 30, 2025.
+;; This package currently uses v1 endpoints but includes preparation for v2 migration.
+;; See https://developer.atlassian.com/cloud/confluence/rest/v1/intro/ for current API
+;; and https://developer.atlassian.com/cloud/confluence/rest/v2/intro/ for v2 API.
 
 ;;; Code:
 
@@ -51,13 +57,27 @@
   :type 'string
   :group 'confluemacs)
 
+(defcustom confluemacs-api-version "v1"
+  "Confluence REST API version to use. Valid values are \"v1\" or \"v2\".
+Note: v1 will be deprecated on April 30, 2025."
+  :type '(choice (const :tag "Version 1 (current)" "v1")
+                 (const :tag "Version 2 (future)" "v2"))
+  :group 'confluemacs)
+
+(defcustom confluemacs-user-agent "Confluemacs/0.5 Emacs"
+  "User-Agent string for API requests."
+  :type 'string
+  :group 'confluemacs)
+
 (defvar confluemacs--current-path nil
   "Current path in Confluemacs buffer (e.g., \\='spaces\\=' or \\='spaces/TST\\=').")
 (defvar confluemacs--buffer-name "*Confluemacs*"
   "Name of the Confluemacs buffer.")
 
 (defun confluemacs--get-credentials ()
-  "Retrieve Confluence Cloud credentials from .authinfo.gpg."
+  "Retrieve Confluence Cloud credentials from .authinfo.gpg.
+Returns (EMAIL . API-TOKEN) where API-TOKEN is required for authentication.
+Note: Basic auth with passwords is deprecated - you must use API tokens."
   (let* ((auth (auth-source-search :host confluemacs-auth-source-host
                                    :require '(:user :secret)
                                    :create t))
@@ -65,13 +85,13 @@
          (secret (plist-get (car auth) :secret))
          (token (if (functionp secret) (funcall secret) secret)))
     (unless (and user token)
-      (error "Failed to retrieve credentials from .authinfo.gpg"))
+      (error "Failed to retrieve credentials from .authinfo.gpg. Ensure you have an entry with your email and API token (not password)"))
     (cons user token)))
 
 (defun confluemacs--make-request (endpoint method &optional params data headers)
   "Make an HTTP request to the Confluence Cloud API.
-ENDPOINT is the API endpoint path (e.g., \\='/rest/api/content\\=').
-METHOD is the HTTP method (e.g., \\='GET, \\='POST).
+ENDPOINT is the API endpoint path (e.g., \\='/content\\=' for v1 or \\='/pages\\=' for v2).
+METHOD is the HTTP method (e.g., \\='GET\\=', \\='POST\\=').
 PARAMS is an alist of query parameters.
 DATA is the request body (for POST/PUT).
 HEADERS is an alist of additional headers."
@@ -80,15 +100,21 @@ HEADERS is an alist of additional headers."
   (let* ((creds (confluemacs--get-credentials))
          (user (car creds))
          (token (cdr creds))
-         (url (concat confluemacs-base-url "/rest/api" endpoint))
+         (api-path (if (string= confluemacs-api-version "v2")
+                       "/wiki/rest/api/v2"
+                     "/rest/api"))
+         (url (concat confluemacs-base-url api-path endpoint))
          (auth (format "Basic %s"
-                       (base64-encode-string (concat user ":" token))))
+                       (base64-encode-string (concat user ":" token) t)))
          (default-headers `(("Authorization" . ,auth)
                             ("Content-Type" . "application/json")
-                            ("X-Atlassian-Token" . "nocheck")))
+                            ("Accept" . "application/json")
+                            ("User-Agent" . ,confluemacs-user-agent)
+                            ("X-Atlassian-Token" . "no-check")))
          (all-headers (append headers default-headers))
          (response-data nil)
-         (error-occurred nil))
+         (response-status nil)
+         (error-thrown nil))
     (request url
       :type method
       :params params
@@ -101,12 +127,29 @@ HEADERS is an alist of additional headers."
                 (lambda (&key data &allow-other-keys)
                   (setq response-data data)))
       :error (cl-function
-              (lambda (&key error-thrown &allow-other-keys)
-                (setq error-occurred t)
-                (message "Confluemacs API error: %s" error-thrown))))
-    (if error-occurred
-        nil
-      response-data)))
+              (lambda (&key error-thrown response &allow-other-keys)
+                (setq response-status (request-response-status-code response))
+                (cond
+                 ((eq response-status 410)
+                  (message "Confluemacs: API endpoint deprecated. Please update to v2 API."))
+                 ((eq response-status 401)
+                  (message "Confluemacs: Authentication failed. Check your API token."))
+                 ((eq response-status 403)
+                  (message "Confluemacs: Permission denied."))
+                 ((eq response-status 429)
+                  (message "Confluemacs: Rate limit exceeded. Please try again later."))
+                 (t
+                  (message "Confluemacs API error: %s (Status: %s)"
+                           (or error-thrown "Unknown error")
+                           (or response-status "Unknown"))))))
+      :complete (cl-function
+                 (lambda (&key response &allow-other-keys)
+                   (setq response-status (request-response-status-code response)))))
+    (cond
+     ((and response-status (>= response-status 400))
+      nil)
+     (response-data response-data)
+     (t nil))))
 
 (defun confluemacs--handle-response (data)
   "Process the API response DATA and return it."
@@ -114,11 +157,28 @@ HEADERS is an alist of additional headers."
       (cdr (assq 'results data))
     data))
 
+(defun confluemacs--api-v2-ready-p ()
+  "Check if the package is configured for API v2."
+  (string= confluemacs-api-version "v2"))
+
+(defun confluemacs--warn-v1-deprecation ()
+  "Display a warning about v1 API deprecation."
+  (when (not (confluemacs--api-v2-ready-p))
+    (message "Warning: Confluence REST API v1 will be deprecated on April 30, 2025. Consider testing with v2.")))
+
 (defun confluemacs--check-edit-permission (content-id)
-  "Check if the user has edit permission for CONTENT-ID."
-  (let ((response (confluemacs--make-request
-                   (format "/content/%s/restriction/byOperation/update" content-id) "GET")))
-    (not (null response))))
+  "Check if the user has edit permission for CONTENT-ID.
+Note: Permission checking has limitations in Confluence Cloud API."
+  (condition-case err
+      (let ((response (confluemacs--make-request
+                       (format "/content/%s/restriction/byOperation/update" content-id) "GET")))
+        ;; If we get a response without error, assume we have permission
+        ;; The actual permission logic is more complex but this is a reasonable approximation
+        (not (null response)))
+    (error
+     ;; If we get an error, assume no edit permission
+     (message "Could not check edit permission: %s" err)
+     nil)))
 
 (defun confluemacs--org-to-confluence (org-text)
   "Convert ORG-TEXT to Confluence storage format (HTML)."
@@ -374,7 +434,8 @@ SPACE-KEY is optional."
    ["Advanced"
     ("sg" "Get spaces" confluemacs-get-spaces)
     ("cg" "Get content" confluemacs-get-content)
-    ("ss" "Search" confluemacs-search)]])
+    ("ss" "Search" confluemacs-search)
+    ("v" "Check API version" confluemacs-check-api-version)]])
 
 (defun confluemacs-get-spaces (&optional params)
   "Retrieve a list of spaces.
@@ -391,6 +452,22 @@ PARAMS is an alist of query parameters."
   (let ((params (append params `(("cql" . ,cql)
                                  ("expand" . ,confluemacs-expand-default)))))
     (confluemacs--make-request "/content/search" "GET" params)))
+
+(defun confluemacs-check-api-version ()
+  "Check the current API version configuration and deprecation status."
+  (interactive)
+  (let ((current-version confluemacs-api-version)
+        (base-url confluemacs-base-url))
+    (message "Confluemacs API Configuration:
+- Current API version: %s
+- Base URL: %s
+- Deprecation: v1 will be removed on April 30, 2025
+- Status: %s"
+             current-version
+             base-url
+             (if (string= current-version "v2")
+                 "Ready for v2 (experimental)"
+               "Using v1 (migration recommended)"))))
 
 (provide 'confluemacs)
 ;;; confluemacs.el ends here
