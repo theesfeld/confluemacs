@@ -103,7 +103,7 @@
               (setq mode-line-format
                     (append mode-line-format
                             '(" " (:eval (when (bound-and-true-p confluemacs-content-modified)
-                                          " [Modified]")))))))
+                                          " [Modified]"))))))))
 ```
 
 #### Manual Installation from GitHub
