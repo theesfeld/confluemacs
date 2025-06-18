@@ -108,31 +108,6 @@ Note: v1 will be deprecated on April 30, 2025."
   :type 'directory
   :group 'confluemacs-editing)
 
-(defcustom confluemacs-cache-enabled t
-  "Whether to enable API response caching."
-  :type 'boolean
-  :group 'confluemacs-advanced)
-
-(defcustom confluemacs-cache-ttl 300
-  "Time-to-live for cached API responses in seconds (default: 5 minutes)."
-  :type 'integer
-  :group 'confluemacs-advanced)
-
-(defcustom confluemacs-cache-max-size 100
-  "Maximum number of entries in the API cache."
-  :type 'integer
-  :group 'confluemacs-advanced)
-
-(defcustom confluemacs-page-size 25
-  "Number of items to display per page in content listings."
-  :type 'integer
-  :group 'confluemacs-interface)
-
-(defcustom confluemacs-max-items 1000
-  "Maximum number of items to fetch from API (prevents runaway requests)."
-  :type 'integer
-  :group 'confluemacs-advanced)
-
 (defvar confluemacs--current-path nil
   "Current path in Confluemacs buffer (e.g., \\='spaces\\=' or \\='spaces/TST\\=').")
 (defvar confluemacs--buffer-name "*Confluemacs*"
@@ -148,18 +123,6 @@ Note: v1 will be deprecated on April 30, 2025."
   "Timer for auto-saving drafts.")
 (defvar confluemacs--auto-save-buffers '()
   "List of buffers that need auto-saving.")
-(defvar confluemacs--api-cache (make-hash-table :test 'equal)
-  "Hash table for caching API responses.")
-(defvar confluemacs--cache-cleanup-timer nil
-  "Timer for cleaning up expired cache entries.")
-(defvar confluemacs--current-page 0
-  "Current page number in content listings.")
-(defvar confluemacs--total-pages 0
-  "Total number of pages available.")
-(defvar confluemacs--current-results nil
-  "Current page of results for pagination.")
-(defvar confluemacs--pagination-context nil
-  "Context for pagination (endpoint, params, etc).")
 
 (defun confluemacs--generate-unique-buffer-name (base-name &optional space-key)
   "Generate a unique buffer name based on BASE-NAME and optional SPACE-KEY."
@@ -464,7 +427,7 @@ Note: v1 will be deprecated on April 30, 2025."
      ;; Generic error with recovery options
      (t
       (let ((choice (read-char-choice 
-                     (format "Error in %s: %s\n[r]etry, [i]gnore, [d]ebug, [c]onfigure: " 
+                     (format "Error in %s: %s\n(r)etry, (i)gnore, (d)ebug, (c)onfigure: " 
                              operation-name error-msg)
                      '(?r ?i ?d ?c))))
         (pcase choice
@@ -505,196 +468,6 @@ Note: v1 will be deprecated on April 30, 2025."
                 (switch-to-buffer buffer))))))
       (message "Recovered %d draft(s)" recovered-count))))
 
-;;; Caching system
-
-(defun confluemacs--cache-key (endpoint method params)
-  "Generate cache key for ENDPOINT, METHOD, and PARAMS."
-  (format "%s:%s:%s" method endpoint 
-          (if params (json-encode params) "")))
-
-(defun confluemacs--cache-put (key data)
-  "Store DATA in cache with KEY and current timestamp."
-  (when confluemacs-cache-enabled
-    (let ((entry (list data (current-time))))
-      (puthash key entry confluemacs--api-cache)
-      ;; Start cleanup timer if not running
-      (confluemacs--start-cache-cleanup-timer)
-      ;; Enforce max cache size
-      (confluemacs--enforce-cache-size))))
-
-(defun confluemacs--cache-get (key)
-  "Retrieve data from cache for KEY if not expired."
-  (when confluemacs-cache-enabled
-    (let ((entry (gethash key confluemacs--api-cache)))
-      (when entry
-        (let ((data (car entry))
-              (timestamp (cadr entry)))
-          (if (< (float-time (time-subtract (current-time) timestamp))
-                 confluemacs-cache-ttl)
-              data
-            ;; Expired entry, remove it
-            (remhash key confluemacs--api-cache)
-            nil))))))
-
-(defun confluemacs--cache-invalidate (pattern)
-  "Invalidate cache entries matching PATTERN (regexp)."
-  (maphash (lambda (key _value)
-             (when (string-match-p pattern key)
-               (remhash key confluemacs--api-cache)))
-           confluemacs--api-cache))
-
-(defun confluemacs--enforce-cache-size ()
-  "Enforce maximum cache size by removing oldest entries."
-  (let ((cache-size (hash-table-count confluemacs--api-cache)))
-    (when (> cache-size confluemacs-cache-max-size)
-      (let ((entries '()))
-        ;; Collect all entries with timestamps
-        (maphash (lambda (key value)
-                   (push (list key (cadr value)) entries))
-                 confluemacs--api-cache)
-        ;; Sort by timestamp (oldest first)
-        (setq entries (sort entries (lambda (a b) 
-                                      (time-less-p (cadr a) (cadr b)))))
-        ;; Remove oldest entries until we're under the limit
-        (let ((to-remove (- cache-size confluemacs-cache-max-size)))
-          (dolist (entry (seq-take entries to-remove))
-            (remhash (car entry) confluemacs--api-cache)))))))
-
-(defun confluemacs--cleanup-expired-cache ()
-  "Remove expired entries from the cache."
-  (let ((current-time (current-time))
-        (expired-keys '()))
-    (maphash (lambda (key value)
-               (let ((timestamp (cadr value)))
-                 (when (>= (float-time (time-subtract current-time timestamp))
-                          confluemacs-cache-ttl)
-                   (push key expired-keys))))
-             confluemacs--api-cache)
-    (dolist (key expired-keys)
-      (remhash key confluemacs--api-cache))))
-
-(defun confluemacs--start-cache-cleanup-timer ()
-  "Start periodic cache cleanup timer."
-  (unless confluemacs--cache-cleanup-timer
-    (setq confluemacs--cache-cleanup-timer
-          (run-with-timer confluemacs-cache-ttl 
-                          confluemacs-cache-ttl
-                          #'confluemacs--cleanup-expired-cache))))
-
-(defun confluemacs--stop-cache-cleanup-timer ()
-  "Stop cache cleanup timer."
-  (when confluemacs--cache-cleanup-timer
-    (cancel-timer confluemacs--cache-cleanup-timer)
-    (setq confluemacs--cache-cleanup-timer nil)))
-
-(defun confluemacs-clear-cache ()
-  "Clear all cached API responses."
-  (interactive)
-  (clrhash confluemacs--api-cache)
-  (message "API cache cleared"))
-
-(defun confluemacs-cache-stats ()
-  "Display cache statistics."
-  (interactive)
-  (let ((size (hash-table-count confluemacs--api-cache))
-        (enabled (if confluemacs-cache-enabled "enabled" "disabled")))
-    (message "Cache: %s, %d entries, TTL: %ds, Max: %d"
-             enabled size confluemacs-cache-ttl confluemacs-cache-max-size)))
-
-;;; Pagination system
-
-(defun confluemacs--paginate-request (endpoint params &optional start limit)
-  "Make a paginated request to ENDPOINT with PARAMS.
-START is the starting index (default: 0).
-LIMIT is the number of items per page (default: confluemacs-page-size)."
-  (let* ((start (or start 0))
-         (limit (or limit confluemacs-page-size))
-         (paginated-params (append params `(("start" . ,start) ("limit" . ,limit))))
-         (response (confluemacs--make-request endpoint "GET" paginated-params)))
-    (when response
-      (let* ((results (confluemacs--handle-response response))
-             (size (or (cdr (assq 'size response)) 0))
-             (total (or (cdr (assq 'totalSize response)) size))
-             (total-pages (ceiling (float total) limit)))
-        (setq confluemacs--current-page (/ start limit))
-        (setq confluemacs--total-pages total-pages)
-        (setq confluemacs--current-results results)
-        (setq confluemacs--pagination-context 
-              (list :endpoint endpoint :params params :limit limit))
-        (list :results results :total total :current-page confluemacs--current-page 
-              :total-pages total-pages :has-more (< (+ start limit) total))))))
-
-(defun confluemacs--next-page ()
-  "Load the next page of results."
-  (when (and confluemacs--pagination-context
-             (< confluemacs--current-page (1- confluemacs--total-pages)))
-    (let* ((context confluemacs--pagination-context)
-           (endpoint (plist-get context :endpoint))
-           (params (plist-get context :params))
-           (limit (plist-get context :limit))
-           (next-start (* (1+ confluemacs--current-page) limit)))
-      (confluemacs--paginate-request endpoint params next-start limit))))
-
-(defun confluemacs--previous-page ()
-  "Load the previous page of results."
-  (when (and confluemacs--pagination-context
-             (> confluemacs--current-page 0))
-    (let* ((context confluemacs--pagination-context)
-           (endpoint (plist-get context :endpoint))
-           (params (plist-get context :params))
-           (limit (plist-get context :limit))
-           (prev-start (* (1- confluemacs--current-page) limit)))
-      (confluemacs--paginate-request endpoint params prev-start limit))))
-
-(defun confluemacs--goto-page (page-num)
-  "Go to specific PAGE-NUM."
-  (when (and confluemacs--pagination-context
-             (>= page-num 0)
-             (< page-num confluemacs--total-pages))
-    (let* ((context confluemacs--pagination-context)
-           (endpoint (plist-get context :endpoint))
-           (params (plist-get context :params))
-           (limit (plist-get context :limit))
-           (start (* page-num limit)))
-      (confluemacs--paginate-request endpoint params start limit))))
-
-(defun confluemacs--format-pagination-info ()
-  "Format pagination information for display."
-  (if (and confluemacs--pagination-context confluemacs--total-pages)
-      (format " [Page %d/%d]" 
-              (1+ confluemacs--current-page) 
-              confluemacs--total-pages)
-    ""))
-
-(defun confluemacs-next-page ()
-  "Navigate to the next page of results."
-  (interactive)
-  (when (confluemacs--next-page)
-    (confluemacs--refresh-current-display)))
-
-(defun confluemacs-previous-page ()
-  "Navigate to the previous page of results."
-  (interactive)
-  (when (confluemacs--previous-page)
-    (confluemacs--refresh-current-display)))
-
-(defun confluemacs-goto-page (page-num)
-  "Navigate to specific PAGE-NUM."
-  (interactive "nGo to page: ")
-  (when (confluemacs--goto-page (1- page-num))  ; Convert to 0-based
-    (confluemacs--refresh-current-display)))
-
-(defun confluemacs--refresh-current-display ()
-  "Refresh the current display with new pagination data."
-  (with-current-buffer confluemacs--buffer-name
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (if (equal confluemacs--current-path "spaces")
-          (confluemacs--display-paginated-spaces)
-        (let ((space-key (cadr (split-string confluemacs--current-path "/"))))
-          (confluemacs--display-paginated-content space-key)))
-      (goto-char (point-min)))))
-
 (defun confluemacs--get-credentials ()
   "Retrieve Confluence Cloud credentials from .authinfo.gpg.
 Returns (EMAIL . API-TOKEN) where API-TOKEN is required for authentication.
@@ -710,7 +483,7 @@ Note: Basic auth with passwords is deprecated - you must use API tokens."
     (cons user token)))
 
 (defun confluemacs--make-request (endpoint method &optional params data headers)
-  "Make an HTTP request to the Confluence Cloud API with caching support.
+  "Make an HTTP request to the Confluence Cloud API.
 ENDPOINT is the API endpoint path (e.g., \\='/content\\=' for v1 or \\='/pages\\=' for v2).
 METHOD is the HTTP method (e.g., \\='GET\\=', \\='POST\\=').
 PARAMS is an alist of query parameters.
@@ -718,59 +491,44 @@ DATA is the request body (for POST/PUT).
 HEADERS is an alist of additional headers."
   (unless confluemacs-base-url
     (error "Confluemacs base URL not set"))
-  
-  ;; Check cache for GET requests only
-  (let ((cache-key (when (string= method "GET")
-                     (confluemacs--cache-key endpoint method params))))
-    (if (and cache-key (confluemacs--cache-get cache-key))
-        ;; Return cached response
-        (confluemacs--cache-get cache-key)
-      
-      ;; Make actual API request
-      (let* ((creds (confluemacs--get-credentials))
-             (user (car creds))
-             (token (cdr creds))
-             (api-path (if (string= confluemacs-api-version "v2")
-                           "/wiki/rest/api/v2"
-                         "/rest/api"))
-             (url (concat confluemacs-base-url api-path endpoint))
-             (auth (format "Basic %s"
-                           (base64-encode-string (concat user ":" token) t)))
-             (all-headers (append headers
-                                  `(("Authorization" . ,auth)
-                                    ("Content-Type" . "application/json")
-                                    ("Accept" . "application/json")
-                                    ("User-Agent" . ,confluemacs-user-agent)
-                                    ("X-Atlassian-Token" . "no-check")))))
-        (condition-case err
-            (let ((response (plz method url
-                               :headers all-headers
-                               :params params
-                               :body (when data (json-encode data))
-                               :as 'json)))
-              ;; Cache successful GET responses
-              (when cache-key
-                (confluemacs--cache-put cache-key response))
-              ;; Invalidate related cache entries for write operations
-              (when (member method '("POST" "PUT" "DELETE"))
-                (confluemacs--cache-invalidate (regexp-quote endpoint)))
-              response)
-          (plz-error
-           (let ((status (plist-get (cdr err) :status)))
-             (cond
-              ((eq status 410)
-               (message "Confluemacs: API endpoint deprecated. Please update to v2 API."))
-              ((eq status 401)
-               (message "Confluemacs: Authentication failed. Check your API token."))
-              ((eq status 403)
-               (message "Confluemacs: Permission denied."))
-              ((eq status 429)
-               (message "Confluemacs: Rate limit exceeded. Please try again later."))
-              (t
-               (message "Confluemacs API error: %s (Status: %s)"
-                        (plist-get (cdr err) :message)
-                        (or status "Unknown"))))
-             nil))))))
+  (let* ((creds (confluemacs--get-credentials))
+         (user (car creds))
+         (token (cdr creds))
+         (api-path (if (string= confluemacs-api-version "v2")
+                       "/wiki/rest/api/v2"
+                     "/rest/api"))
+         (url (concat confluemacs-base-url api-path endpoint))
+         (auth (format "Basic %s"
+                       (base64-encode-string (concat user ":" token) t)))
+         (all-headers (append headers
+                              `(("Authorization" . ,auth)
+                                ("Content-Type" . "application/json")
+                                ("Accept" . "application/json")
+                                ("User-Agent" . ,confluemacs-user-agent)
+                                ("X-Atlassian-Token" . "no-check")))))
+    (condition-case err
+        (let ((response (plz method url
+                           :headers all-headers
+                           :params params
+                           :body (when data (json-encode data))
+                           :as 'json)))
+          response)
+      (plz-error
+       (let ((status (plist-get (cdr err) :status)))
+         (cond
+          ((eq status 410)
+           (message "Confluemacs: API endpoint deprecated. Please update to v2 API."))
+          ((eq status 401)
+           (message "Confluemacs: Authentication failed. Check your API token."))
+          ((eq status 403)
+           (message "Confluemacs: Permission denied."))
+          ((eq status 429)
+           (message "Confluemacs: Rate limit exceeded. Please try again later."))
+          (t
+           (message "Confluemacs API error: %s (Status: %s)"
+                    (plist-get (cdr err) :message)
+                    (or status "Unknown"))))
+         nil)))))
 
 (defun confluemacs--make-request-async (endpoint method callback &optional params data headers)
   "Make an asynchronous HTTP request to the Confluence Cloud API.
@@ -1006,12 +764,6 @@ This function uses call-process instead of shell-command for security."
     (define-key map (kbd "d") 'confluemacs-delete)
     (define-key map (kbd "^") 'confluemacs-up)
     (define-key map (kbd "m") 'confluemacs-menu)
-    ;; Pagination navigation
-    (define-key map (kbd "n") 'confluemacs-next-page)
-    (define-key map (kbd "p") 'confluemacs-previous-page)
-    (define-key map (kbd "G") 'confluemacs-goto-page)
-    ;; Search - disabled until implementation
-    ;; (define-key map (kbd "s") 'confluemacs-search-interactive)
     map)
   "Keymap for `confluemacs-mode'.")
 
@@ -1055,45 +807,34 @@ This function uses call-process instead of shell-command for security."
                              'confluemacs-key key))))))
 
 (defun confluemacs--display-spaces-async ()
-  "Asynchronously display a list of Confluence spaces with pagination."
+  "Asynchronously display a list of Confluence spaces."
   (confluemacs--show-progress "Loading spaces")
-  (let* ((pagination-result (confluemacs--paginate-request "/space" '()))
-         (spaces (plist-get pagination-result :results)))
-    (confluemacs--hide-progress)
-    (if spaces
-        (confluemacs--display-paginated-spaces)
-      (message "No spaces found or failed to load spaces"))))
-
-(defun confluemacs--display-paginated-spaces ()
-  "Display paginated spaces in the main buffer."
-  (with-current-buffer confluemacs--buffer-name
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (when confluemacs--current-results
-        ;; Header with pagination info
-        (insert (format "Confluence Spaces%s\n" (confluemacs--format-pagination-info)))
-        (insert (make-string 50 ?=))
-        (insert "\n\n")
-        (insert (format "%-10s %-30s\n" "Key" "Name"))
-        (insert (make-string 40 ?-))
-        (insert "\n")
-        ;; Display spaces
-        (dolist (space confluemacs--current-results)
-          (let ((key (cdr (assq 'key space)))
-                (name (cdr (assq 'name space))))
-            (insert (format "%-10s %-30s\n" key name))
-            (put-text-property (line-beginning-position) (line-end-position)
-                               'confluemacs-type 'space)
-            (put-text-property (line-beginning-position) (line-end-position)
-                               'confluemacs-key key)))
-        ;; Footer with navigation help
-        (insert "\n")
-        (insert (make-string 40 ?-))
-        (insert "\n")
-        (when (> confluemacs--total-pages 1)
-          (insert "Navigation: [n] next page  [p] previous page  [g] goto page\n"))
-        (insert "Commands: [RET] open  [g] refresh  [m] menu\n"))
-      (goto-char (point-min))))))
+  (confluemacs--make-request-async 
+   "/space" "GET"
+   (lambda (result)
+     (confluemacs--hide-progress)
+     (let ((data (car result))
+           (error (cdr result)))
+       (if error
+           (message "Failed to load spaces: %s" error)
+         (with-current-buffer confluemacs--buffer-name
+           (let ((inhibit-read-only t)
+                 (spaces (confluemacs--handle-response data)))
+             (erase-buffer)
+             (when spaces
+               (insert (format "%-10s %-30s\n" "Key" "Name"))
+               (insert (make-string 40 ?-))
+               (insert "\n")
+               (dolist (space spaces)
+                 (let ((key (cdr (assq 'key space)))
+                       (name (cdr (assq 'name space))))
+                   (insert (format "%-10s %-30s\n" key name))
+                   (put-text-property (line-beginning-position) (line-end-position)
+                                      'confluemacs-type 'space)
+                   (put-text-property (line-beginning-position) (line-end-position)
+                                      'confluemacs-key key))))
+             (goto-char (point-min)))))))
+   '(("limit" . 100))))
 
 (defun confluemacs--display-content (space-key)
   "Display content for SPACE-KEY."
@@ -1114,51 +855,34 @@ This function uses call-process instead of shell-command for security."
                              'confluemacs-id id))))))
 
 (defun confluemacs--display-content-async (space-key)
-  "Asynchronously display content for SPACE-KEY with pagination."
+  "Asynchronously display content for SPACE-KEY."
   (confluemacs--show-progress "Loading content")
-  (let* ((params `(("spaceKey" . ,space-key) ("expand" . ,confluemacs-expand-default)))
-         (pagination-result (confluemacs--paginate-request "/content" params))
-         (content-list (plist-get pagination-result :results)))
-    (confluemacs--hide-progress)
-    (if content-list
-        (confluemacs--display-paginated-content space-key)
-      (message "No content found or failed to load content for space %s" space-key))))
-
-(defun confluemacs--display-paginated-content (space-key)
-  "Display paginated content for SPACE-KEY in the main buffer."
-  (with-current-buffer confluemacs--buffer-name
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (when confluemacs--current-results
-        ;; Header with space info and pagination
-        (insert (format "Space: %s%s\n" space-key (confluemacs--format-pagination-info)))
-        (insert (make-string 50 ?=))
-        (insert "\n\n")
-        (insert (format "%-10s %-40s %-15s\n" "ID" "Title" "Type"))
-        (insert (make-string 65 ?-))
-        (insert "\n")
-        ;; Display content
-        (dolist (content confluemacs--current-results)
-          (let ((id (cdr (assq 'id content)))
-                (title (cdr (assq 'title content)))
-                (type (cdr (assq 'type content))))
-            (insert (format "%-10s %-40s %-15s\n" id 
-                           (if (> (length title) 40)
-                               (concat (substring title 0 37) "...")
-                             title)
-                           (or type "page")))
-            (put-text-property (line-beginning-position) (line-end-position)
-                               'confluemacs-type 'content)
-            (put-text-property (line-beginning-position) (line-end-position)
-                               'confluemacs-id id)))
-        ;; Footer with navigation help
-        (insert "\n")
-        (insert (make-string 65 ?-))
-        (insert "\n")
-        (when (> confluemacs--total-pages 1)
-          (insert "Navigation: [n] next page  [p] previous page  [g] goto page\n"))
-        (insert "Commands: [RET] open  [^] up  [c] create  [d] delete  [m] menu\n"))
-      (goto-char (point-min))))))
+  (confluemacs--make-request-async 
+   "/content" "GET"
+   (lambda (result)
+     (confluemacs--hide-progress)
+     (let ((data (car result))
+           (error (cdr result)))
+       (if error
+           (message "Failed to load content: %s" error)
+         (with-current-buffer confluemacs--buffer-name
+           (let ((inhibit-read-only t)
+                 (content-list (confluemacs--handle-response data)))
+             (erase-buffer)
+             (when content-list
+               (insert (format "%-10s %-30s\n" "ID" "Title"))
+               (insert (make-string 40 ?-))
+               (insert "\n")
+               (dolist (content content-list)
+                 (let ((id (cdr (assq 'id content)))
+                       (title (cdr (assq 'title content))))
+                   (insert (format "%-10s %-30s\n" id title))
+                   (put-text-property (line-beginning-position) (line-end-position)
+                                      'confluemacs-type 'content)
+                   (put-text-property (line-beginning-position) (line-end-position)
+                                      'confluemacs-id id))))
+             (goto-char (point-min)))))))
+   `(("spaceKey" . ,space-key) ("expand" . ,confluemacs-expand-default) ("limit" . 100))))
 
 (defun confluemacs-open ()
   "Open the item at point (space or content)."
@@ -1331,14 +1055,10 @@ SPACE-KEY is optional."
     ("d" "Delete" confluemacs-delete)
     ("s" "Save all modified" confluemacs-save-all-modified)
     ("l" "List content buffers" confluemacs-list-content-buffers)]
-   ["Navigation"
-    ("n" "Next page" confluemacs-next-page)
-    ("p" "Previous page" confluemacs-previous-page)
-    ("G" "Go to page" confluemacs-goto-page)]
    ["Advanced"
     ("sg" "Get spaces" confluemacs-get-spaces)
     ("cg" "Get content" confluemacs-get-content)
-    ("ss" "Search (CQL)" confluemacs-search)]
+    ("ss" "Search" confluemacs-search)]
    ["API Management"
     ("v" "Check API version" confluemacs-check-api-version)
     ("V" "Migrate to API v2" confluemacs-migrate-to-v2)]
