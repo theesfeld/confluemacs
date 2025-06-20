@@ -408,7 +408,7 @@ Note: v1 will be deprecated on April 30, 2025."
      ;; Network/connection errors
      ((string-match-p "connection\\|network\\|timeout" error-msg)
       (when (y-or-n-p (format "Network error in %s: %s. Retry? " operation-name error-msg))
-        (confluemacs--with-error-recovery operation args)))
+        (apply operation args)))
      
      ;; Authentication errors
      ((string-match-p "auth\\|credential\\|token" error-msg)
@@ -431,7 +431,7 @@ Note: v1 will be deprecated on April 30, 2025."
                              operation-name error-msg)
                      '(?r ?i ?d ?c))))
         (pcase choice
-          (?r (confluemacs--with-error-recovery operation args))
+          (?r (apply operation args))
           (?i (message "Ignoring error: %s" error-msg))
           (?d (debug err))
           (?c (confluemacs-validate-configuration))))))))
@@ -632,7 +632,7 @@ HEADERS is an alist of additional headers."
     (confluemacs--make-request-async 
      "/space" "GET"
      (lambda (result)
-       (let ((data (car result))
+       (let ((_data (car result))
              (error (cdr result)))
          (setq v1-working (not error))
          ;; Test v2 API
@@ -642,7 +642,7 @@ HEADERS is an alist of additional headers."
           (lambda (result2)
             (confluemacs--hide-progress)
             (setq confluemacs-api-version original-version)
-            (let ((data2 (car result2))
+            (let ((_data2 (car result2))
                   (error2 (cdr result2)))
               (setq v2-working (not error2))
               (message "API Version Check Results:\nv1 API: %s\nv2 API: %s\n\nCurrent setting: %s\nRecommendation: %s"
@@ -654,8 +654,7 @@ HEADERS is an alist of additional headers."
                         (v2-working "Migrate to v2 immediately - v1 may be disabled")
                         (v1-working "Continue with v1 for now, but prepare for v2 migration")
                         (t "Check your connection and credentials")))))
-          '(("limit" . 1))))
-         ))
+          '(("limit" . 1)))))
      '(("limit" . 1)))))
 
 ;;;###autoload
@@ -688,8 +687,8 @@ Note: Permission checking has limitations in Confluence Cloud API."
       ""
     (if (executable-find "pandoc")
         (confluemacs--convert-with-pandoc org-text "org" "html")
-      (let ((org-export-with-toc nil)
-            (org-export-with-section-numbers nil))
+      (let ((_org-export-with-toc nil)
+            (_org-export-with-section-numbers nil))
         (org-export-string-as org-text 'html t)))))
 
 (defun confluemacs--confluence-to-org (html-text)
@@ -750,12 +749,6 @@ This function uses call-process instead of shell-command for security."
     stripped))
 
 ;;; Dired-like Interface
-(define-derived-mode confluemacs-mode special-mode "Confluemacs"
-  "Major mode for browsing Confluence Cloud spaces and content."
-  (setq buffer-read-only t)
-  (setq truncate-lines t)
-  (use-local-map confluemacs-mode-map))
-
 (defvar confluemacs-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") 'confluemacs-open)
@@ -766,6 +759,12 @@ This function uses call-process instead of shell-command for security."
     (define-key map (kbd "m") 'confluemacs-menu)
     map)
   "Keymap for `confluemacs-mode'.")
+
+(define-derived-mode confluemacs-mode special-mode "Confluemacs"
+  "Major mode for browsing Confluence Cloud spaces and content."
+  (setq buffer-read-only t)
+  (setq truncate-lines t)
+  (use-local-map confluemacs-mode-map))
 
 ;;;###autoload
 (defun confluemacs ()
@@ -951,7 +950,7 @@ EXPAND is a string of fields to expand (default: confluemacs-expand-default)."
                 (add-hook 'after-change-functions #'confluemacs--mark-buffer-modified nil t)))
             (switch-to-buffer buffer)
             (when (not can-edit)
-              (message "Content is read-only: No edit permission")))))))
+              (message "Content is read-only: No edit permission"))))))))
 
 (defun confluemacs-create-content (type title space-key)
   "Create content of TYPE with TITLE in SPACE-KEY from an Org-mode buffer."
@@ -1085,21 +1084,8 @@ PARAMS is an alist of query parameters."
                                  ("expand" . ,confluemacs-expand-default)))))
     (confluemacs--make-request "/content/search" "GET" params)))
 
-(defun confluemacs-check-api-version ()
-  "Check the current API version configuration and deprecation status."
-  (interactive)
-  (let ((current-version confluemacs-api-version)
-        (base-url confluemacs-base-url))
-    (message "Confluemacs API Configuration:
-- Current API version: %s
-- Base URL: %s
-- Deprecation: v1 will be removed on April 30, 2025
-- Status: %s"
-             current-version
-             base-url
-             (if (string= current-version "v2")
-                 "Ready for v2 (experimental)"
-               "Using v1 (migration recommended)"))))
+
+) ; Add missing closing paren
 
 (provide 'confluemacs)
 ;;; confluemacs.el ends here
