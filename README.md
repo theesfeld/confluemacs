@@ -66,6 +66,23 @@
 #### Using use-package (Recommended for Emacs 30.1+)
 
 ```elisp
+;; Working configuration - defers loading until actually needed
+(use-package confluemacs
+  :vc (:url "https://github.com/yourusername/confluemacs.git"
+       :rev :newest)
+  :ensure t
+  :defer t
+  :commands (confluemacs)
+  :bind ("C-c f c" . confluemacs)
+  :custom
+  (confluemacs-base-url "https://yourcompany.atlassian.net/wiki")
+  (confluemacs-auth-source-host "yourcompany.atlassian.net")
+  (confluemacs-api-version "v1")
+  (confluemacs-timeout 15))
+```
+
+**Alternative full configuration (use after syntax issues are fixed):**
+```elisp
 (use-package confluemacs
   :vc (:url "https://github.com/yourusername/confluemacs.git"
        :rev :newest)
